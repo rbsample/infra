@@ -1,0 +1,72 @@
+---
+- hosts: tag_Environment_rbsample
+  become: true
+  
+  tasks:
+    - name: Install aptitude using apt
+      apt: name=aptitude state=latest update_cache=yes force_apt_get=yes
+
+    - name: Install required system packages
+      apt: name={{ item }} state=latest update_cache=yes
+      loop: [ 'apt-transport-https', 'ca-certificates', 'curl',
+        'software-properties-common', 'python3-pip', 'virtualenv',
+        'python3-setuptools', 'default-jdk', 'unzip', 'clamdscan',
+        'gnupg2', 'pass']
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: Update apt and install docker-ce
+      apt: update_cache=yes name=docker-ce state=latest
+
+    - name: Install Python Packages
+      pip: name={{ item }}
+      loop: ['awscli', 'bs4', 'requests', 'docker']
+
+    - name: Pull default Docker image
+      docker_image:
+        name: "docker"
+        source: pull
+
+    - name: Install docker compose
+      apt: name=docker-compose state=latest update_cache=yes
+      
+    - name: Start Clam AV Container
+      shell: |
+        docker run --restart unless-stopped -d -p 3310:3310 --name clamav openbridge/clamav 
+        docker network create clamav
+        docker network connect clamav clamav
+    
+    - name: Configure Jenkins Container 
+      shell: |
+        docker network create jenkins
+        docker volume create jenkins-docker-certs
+        docker volume create jenkins-data
+    
+    # https://github.com/docker/compose/issues/6023
+    - name: Fix docker login bug with docker-compose
+      shell: |
+        gpg2 --full-generate-key
+        pass init $(hostname)
+
+    - name: Start Jenkins Container
+      shell: |
+        docker container run   --name jenkins-docker   --restart unless-stopped   --detach   --privileged   --network jenkins   --network-alias docker  --env DOCKER_TLS_CERTDIR=/certs   --volume jenkins-docker-certs:/certs/client  --volume jenkins-data:/var/jenkins_home   --publish 2376:2376   docker:dind
+        docker container run   --name jenkins-blueocean  --restart unless-stopped  --detach  --network jenkins   --env DOCKER_HOST=tcp://docker:2376  --env DOCKER_CERT_PATH=/certs/client   --env DOCKER_TLS_VERIFY=1   --publish 8080:8080   --publish 50000:50000   --volume jenkins-data:/var/jenkins_home   --volume jenkins-docker-certs:/certs/client:ro   jenkinsci/blueocean
+
+    - pause: # Pause for one minute to start Jenkins
+        minutes: 1
+
+    - name: obtain docker initialAdminPassword
+      shell: docker exec jenkins-docker cat /var/jenkins_home/secrets/initialAdminPassword
+      register: ps
+
+    # Print Jenkins initialAdminPassword for unlocking
+    - debug: var=ps.stdout_lines
